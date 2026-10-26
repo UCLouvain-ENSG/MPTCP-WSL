@@ -29,57 +29,85 @@ public class NetworkMonitor
 
 
     /// <summary>
-    ///     Create a task that indefinitely check for addition or deletion of Physical NIC.
+    ///     Create a task that checks for addition or deletion of Physical NIC until the token is cancelled.
     /// </summary>
     /// <param name="refreshDelay">The delay in milliseconds between each update</param>
     public void Loop(int refreshDelay)
     {
         Task.Run(async () =>
         {
-            while (true)
+            while (!_token.IsCancellationRequested)
             {
-                UpdateNetworkInterfaces();
-                await Task.Delay(refreshDelay);
+                try
+                {
+                    UpdateNetworkInterfaces();
+                }
+                catch (Exception e)
+                {
+                    _logger.LogError(e, "Error while updating the network interfaces");
+                }
+
+                try
+                {
+                    await Task.Delay(refreshDelay, _token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }, _token);
     }
 
 
     /// <summary>
-    ///     Add or delete into the hash set names of Physical NIC's, also raise an event containing
+    ///     Add or delete into the list names of Physical NIC's, also raise an event containing
     ///     information about which NIC have been added or deleted.
     /// </summary>
     private void UpdateNetworkInterfaces()
     {
-        var updatedInterfacesName = GetAllNetworkInterfaces();
-        foreach (var netInfo in updatedInterfacesName)
+        var current = GetAllNetworkInterfaces();
+        // The query failed: keep the previous state instead of reporting every NIC as removed.
+        if (current == null) return;
+
+        foreach (var netInfo in current)
             if (!_interfacesNames.Contains(netInfo))
             {
                 _interfacesNames.Add(netInfo);
-                OnUpdate?.Invoke(this, new CollectionUpdateEvent
-                {
-                    NetworkInfo = netInfo,
-                    Type = EventType.Addition
-                });
+                RaiseUpdate(netInfo, EventType.Addition);
             }
 
-        foreach (var netInfo in _interfacesNames)
-            if (!_interfacesNames.Contains(netInfo))
+        foreach (var netInfo in _interfacesNames.Where(n => !current.Contains(n)).ToList())
+        {
+            _interfacesNames.Remove(netInfo);
+            RaiseUpdate(netInfo, EventType.Deletion);
+        }
+    }
+
+    /// <summary>
+    ///     Invoke the handlers one by one so that a failing handler does not prevent the others from running.
+    /// </summary>
+    private void RaiseUpdate(NetworkInformation netInfo, EventType type)
+    {
+        var handlers = OnUpdate;
+        if (handlers == null) return;
+        var args = new CollectionUpdateEvent { NetworkInfo = netInfo, Type = type };
+        foreach (var handler in handlers.GetInvocationList().Cast<EventHandler<CollectionUpdateEvent>>())
+            try
             {
-                updatedInterfacesName.Remove(netInfo);
-                OnUpdate?.Invoke(this, new CollectionUpdateEvent
-                {
-                    NetworkInfo = netInfo,
-                    Type = EventType.Deletion
-                });
+                handler(this, args);
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, "A network update handler failed for {Interface}", netInfo.FriendlyInterfaceName);
             }
     }
 
     /// <summary>
-    ///     Helper function that get the names of all Physical NIC's.
+    ///     Helper function that get all Physical NIC's.
     /// </summary>
-    /// <returns>list containing the names of all physical NIC's</returns>
-    private List<NetworkInformation> GetAllNetworkInterfaces()
+    /// <returns>list containing all physical NIC's, or null if they could not be queried</returns>
+    private List<NetworkInformation>? GetAllNetworkInterfaces()
     {
         var interfaces = new List<NetworkInformation>();
         try
@@ -88,24 +116,28 @@ public class NetworkMonitor
                                         "WHERE (PNPDeviceID LIKE 'PCI%' " +
                                         "OR PNPDeviceID LIKE 'USB%' or PNPDeviceID LIKE 'PCMCIA%') " +
                                         "AND NetConnectionID IS NOT NULL");
-            var searcher = new ManagementObjectSearcher(query);
+            using var searcher = new ManagementObjectSearcher(query);
             foreach (ManagementObject adapter in searcher.Get())
-            {
-                var netInfo = new NetworkInformation
+                using (adapter)
                 {
-                    WindowsMacAddress = MacAddressUtil.FormatMacAddress(adapter["MacAddress"].ToString()),
-                    LinuxMacAddress =
-                        MacAddressUtil.Transform(MacAddressUtil.FormatMacAddress(adapter["MacAddress"].ToString())),
-                    FriendlyInterfaceName = adapter["NetConnectionID"].ToString(),
-                    InterfaceName = adapter["Name"].ToString(),
-                    Types = new List<string>()
-                };
-                interfaces.Add(netInfo);
-            }
+                    // Adapters without a MAC address (e.g. disabled ones) cannot be bridged: skip only that one.
+                    var mac = adapter["MacAddress"]?.ToString();
+                    if (string.IsNullOrEmpty(mac)) continue;
+                    var windowsMac = MacAddressUtil.FormatMacAddress(mac);
+                    interfaces.Add(new NetworkInformation
+                    {
+                        WindowsMacAddress = windowsMac,
+                        LinuxMacAddress = MacAddressUtil.Transform(windowsMac),
+                        FriendlyInterfaceName = adapter["NetConnectionID"].ToString()!,
+                        InterfaceName = adapter["Name"].ToString()!,
+                        Types = new List<string>()
+                    });
+                }
         }
         catch (Exception e)
         {
             _logger.LogError(e, "Error while getting all Physical NIC's names");
+            return null;
         }
 
         return interfaces;

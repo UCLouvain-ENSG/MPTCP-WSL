@@ -17,7 +17,7 @@ To run properly this application need to have :
 - Windows 10/11 x86 Pro Version
 - Windows Subsystem Linux enabled and updated
 - Hyper-V enabled
-- Have an Ubuntu distribution installed.
+- Have an Ubuntu distribution installed, with systemd enabled (add `[boot]` / `systemd=true` to `/etc/wsl.conf` in that distribution, then run `wsl --shutdown`).
 - Have [.NET 7.0 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-7.0.16-windows-x86-installer) installed.
 
 ## Pre-installation setup
@@ -43,7 +43,6 @@ After the installation a config file named `config.json` should be created autom
 
 - **ManageKernelLocation** : If set to true, the application automatically put the correct path of the MPTCP Compatible Kernel located at : `C:\Program Files (x86)\MPTCP\MPTCP Enabler\bzImage`
 - **ManageEndpoint** : if set to true, the endpoint settings will be applied into WSL.
-- **KeepWSL2Awake**:if set to true, it will keep awake WSL2
 - **Config**: Contains information about each NIC, endpoint parameters can be set on the Types section
 - **Proxy**: this section is about using a distant MPTCP-Compatible Proxy. This settings will not be took into account if left blank.
 - **SubflowNr**: This restricts the Multipath TCP connection to use up to  `n` different subflows. Servers should protect themselves by setting this limit to a few subflows. Most use cases would work well with 2 or 4 subflows.
@@ -54,5 +53,7 @@ Each endpoints can be configured as follow:
 -   `signal`. When this flag is set, the path manager will announce the address of the endpoint over any Multipath TCP connection created using other addresses. This flag can be used on clients or servers. It is mainly useful on servers that have multiple addresses.
 -   `backup`. This flag can be combined with the two other flags. When combined with the  `subflow` flag, it indicates that a backup subflow will be created. When combined with the  `signal` flag, it indicates that the address will be advertised as a backup address.
 ## Appendix
+- The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
+- If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1.
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.
 - U could use MPTCP on other distribution like Debian or Kali or other since it will share the same kernel, the most important thing is that the `mptcp-wsl.service` is running on a Ubuntu distribution.

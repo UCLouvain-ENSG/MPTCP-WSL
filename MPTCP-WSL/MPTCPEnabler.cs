@@ -25,12 +25,18 @@ public class MPTCPEnabler
         _networkMonitor = new NetworkMonitor(logger, token, refreshDelay);
         _wslAttacher = new WslAttacher(logger, _config, token);
         _networkMonitor.OnUpdate += _config.NetworkMonitorOnOnUpdate;
+        // async void: an exception escaping here would be unhandled and take the whole service down.
         _networkMonitor.OnUpdate += async (sender, collectionUpdateEvent) =>
         {
-            if (collectionUpdateEvent.Type == EventType.Addition)
+            if (collectionUpdateEvent.Type != EventType.Addition) return;
+            try
             {
                 await _hyperVManager.CreateHyperVSwitch(collectionUpdateEvent.NetworkInfo);
-                Console.WriteLine(collectionUpdateEvent.NetworkInfo.InterfaceName);
+            }
+            catch (Exception e)
+            {
+                logger.LogError(e, "Unable to set up the vSwitch for {Interface}",
+                    collectionUpdateEvent.NetworkInfo.FriendlyInterfaceName);
             }
         };
         _hyperVManager.OnAdd += _wslAttacher.AddEvent;

@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace MPTCP_WSL;
@@ -20,25 +21,26 @@ public class HyperVManager
     }
 
     /// <summary>
-    ///     Check if an external Hyper-V is already created for a specific NIC
+    ///     Check if a Hyper-V switch with this exact name is already attached to the management OS
     /// </summary>
-    /// <param name="interfaceName">The physical name of the NIC</param>
-    /// <returns>true if </returns>
-    private bool IsNetworkInterfaceSwitched(string interfaceName)
+    /// <param name="switchName">The full name of the switch, prefix included</param>
+    /// <returns>true if the switch exists</returns>
+    private bool IsSwitchPresent(string switchName)
     {
-        var switches = RunPowerShell("Get-VMNetworkAdapter -ManagementOS|Select -ExpandProperty SwitchName")
-            .Output.Replace("\r", "");
-        return switches.Contains(interfaceName);
+        var result = RunPowerShell("Get-VMNetworkAdapter -ManagementOS|Select -ExpandProperty SwitchName");
+        if (result.StatusCode != 0) return false;
+        return result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => string.Equals(line.Trim(), switchName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
     ///     Create an external Hyper-V switch for a specific NIC
     /// </summary>
     /// <remarks>
-    ///     all created Hyper-V switch begin with "MTCP - ", only this type of naming is recognized by this app,
+    ///     all created Hyper-V switch begin with "MPTCP - ", only this type of naming is recognized by this app,
     ///     other naming convention will lead to complete disregard by the application and might not function as expected
     /// </remarks>
-    /// <param name="interfaceName">The name of the network interface for which the switch should be created</param>
+    /// <param name="netInfo">The network interface for which the switch should be created</param>
     public async Task CreateHyperVSwitch(NetworkInformation netInfo)
     {
         await Mutex.WaitAsync(); //since Hyper-V don't allow creation of switch simultaneously, a mutex is put here
@@ -49,36 +51,34 @@ public class HyperVManager
             {
                 var interfaceConnectionId = netInfo.FriendlyInterfaceName;
                 var id = vSwitchPrefix + interfaceConnectionId;
-                if (!IsNetworkInterfaceSwitched(interfaceConnectionId))
+                if (!IsSwitchPresent(id))
                 {
                     var command =
-                        $"New-VMSwitch -Name '{id}' -NetAdapterName '{interfaceConnectionId}' -AllowManagementOS $true";
-                    if (RunPowerShell(command).StatusCode == 0)
+                        $"New-VMSwitch -Name {PowerShellQuote(id)} -NetAdapterName {PowerShellQuote(interfaceConnectionId)} -AllowManagementOS $true";
+                    var result = RunPowerShell(command);
+                    if (result.StatusCode != 0)
                     {
-                        netInfo.FriendlyInterfaceName = vSwitchPrefix + netInfo.FriendlyInterfaceName;
-                        OnAdd.Invoke(this, new CollectionUpdateEvent
-                        {
-                            Type = EventType.Addition,
-                            NetworkInfo = netInfo
-                        });
-                        _logger.LogInformation($"vSwitch : {id} created successfully");
+                        _logger.LogWarning("Unable to create the vSwitch : {Id} reason : {Reason}", id,
+                            result.Output);
+                        return;
                     }
-                    else
-                    {
-                        _logger.LogInformation($"Unable to create the vSwitch : {id} reason : " +
-                                               $"{RunPowerShell(command).Output}");
-                    }
+
+                    _logger.LogInformation("vSwitch : {Id} created successfully", id);
                 }
                 else
                 {
-                    _logger.LogInformation($"the vSwitch {id} : already exists");
-                    netInfo.FriendlyInterfaceName = vSwitchPrefix + netInfo.FriendlyInterfaceName;
-                    OnAdd.Invoke(this, new CollectionUpdateEvent
-                    {
-                        Type = EventType.Addition,
-                        NetworkInfo = netInfo
-                    });
+                    _logger.LogInformation("the vSwitch {Id} : already exists", id);
                 }
+
+                // Hand a copy to the listeners: the original is shared with the monitor and the saved config,
+                // and must keep the physical name of the NIC.
+                var switched = netInfo.Clone();
+                switched.FriendlyInterfaceName = id;
+                OnAdd?.Invoke(this, new CollectionUpdateEvent
+                {
+                    Type = EventType.Addition,
+                    NetworkInfo = switched
+                });
             });
         }
         finally
@@ -87,6 +87,21 @@ public class HyperVManager
         }
     }
 
+    /// <summary>
+    ///     Quote a string as a PowerShell single-quoted literal. PowerShell also treats the typographic
+    ///     single quotes as quote characters, so those are doubled as well.
+    /// </summary>
+    private static string PowerShellQuote(string value)
+    {
+        var builder = new StringBuilder("'");
+        foreach (var c in value)
+        {
+            builder.Append(c);
+            if (c is '\'' or '‘' or '’' or '‚' or '‛') builder.Append(c);
+        }
+
+        return builder.Append('\'').ToString();
+    }
 
     /// <summary>
     ///     Helper function that allow to run some PowerShell command
@@ -97,17 +112,22 @@ public class HyperVManager
     {
         try
         {
+            // -EncodedCommand avoids any command-line quoting issue with the interface names.
+            var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue';" + command));
             using var powerShellProcess = new Process();
             powerShellProcess.StartInfo.FileName = "powershell";
-            powerShellProcess.StartInfo.Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command {command}";
+            powerShellProcess.StartInfo.Arguments =
+                $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand {encoded}";
             powerShellProcess.StartInfo.RedirectStandardOutput = true;
             powerShellProcess.StartInfo.RedirectStandardError = true;
             powerShellProcess.StartInfo.UseShellExecute = false;
             powerShellProcess.StartInfo.CreateNoWindow = true;
             powerShellProcess.Start();
 
+            // Read stderr concurrently, otherwise a full stderr pipe blocks the process while we wait on stdout.
+            var errorsTask = powerShellProcess.StandardError.ReadToEndAsync();
             var output = powerShellProcess.StandardOutput.ReadToEnd();
-            var errors = powerShellProcess.StandardError.ReadToEnd();
+            var errors = errorsTask.GetAwaiter().GetResult();
 
             powerShellProcess.WaitForExit();
             var statusCode = powerShellProcess.ExitCode;

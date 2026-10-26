@@ -32,7 +32,8 @@ public class WslConfigManager
         try
         {
             var configFileContent = File.ReadAllText(wslConfigPath);
-            var match = Regex.Match(configFileContent, @"kernel\s*=\s*(.*)", RegexOptions.IgnoreCase);
+            var match = Regex.Match(configFileContent, @"^[ \t]*kernel[ \t]*=[ \t]*(.*)$",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
             if (match.Success)
             {
@@ -57,7 +58,8 @@ public class WslConfigManager
                 configFileContent = Regex.Replace(configFileContent, @"^kernel\s*=\s*.*$", $"kernel = {newKernelPath}",
                     RegexOptions.Multiline);
             else
-                configFileContent += $"kernel = {newKernelPath}\n";
+                configFileContent += (configFileContent.Length == 0 || configFileContent.EndsWith("\n") ? "" : "\r\n") +
+                                     $"kernel = {newKernelPath}\r\n";
             File.WriteAllText(wslConfigPath, configFileContent);
         }
         catch (Exception ex)

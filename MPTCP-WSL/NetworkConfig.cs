@@ -1,8 +1,10 @@
 ﻿using MPTCP_WSL;
 using Newtonsoft.Json;
+using Serilog;
 
 public class NetworkConfig
 {
+    private readonly object _sync = new();
     public bool ManageEndpoint = true;
     public bool ManageKernelLocation = true;
 
@@ -19,8 +21,10 @@ public class NetworkConfig
 
     public void NetworkMonitorOnOnUpdate(object? sender, CollectionUpdateEvent e)
     {
-        if (!Config.Contains(e.NetworkInfo))
+        if (e.Type != EventType.Addition) return;
+        lock (_sync)
         {
+            if (Config.Contains(e.NetworkInfo)) return;
             Config.Add(e.NetworkInfo);
             SaveConfigToFile();
         }
@@ -29,10 +33,24 @@ public class NetworkConfig
 
     public void SaveConfigToFile()
     {
-        var cfgPath = FileManager.GetConfigPath();
-        if (cfgPath == null) return;
-        var json = JsonConvert.SerializeObject(this, Formatting.Indented);
-        File.WriteAllText(cfgPath, json);
+        try
+        {
+            var cfgPath = FileManager.GetConfigPath();
+            if (cfgPath == null) return;
+            lock (_sync)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cfgPath)!);
+                var json = JsonConvert.SerializeObject(this, Formatting.Indented);
+                // Write then move so the Linux side never reads a half-written file.
+                var tmpPath = cfgPath + ".tmp";
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, cfgPath, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Unable to save the configuration file");
+        }
     }
 
     public static NetworkConfig LoadConfigFromFile()
@@ -40,7 +58,7 @@ public class NetworkConfig
         try
         {
             var cfgPath = FileManager.GetConfigPath();
-            if (File.Exists(cfgPath))
+            if (cfgPath != null && File.Exists(cfgPath))
             {
                 var json = File.ReadAllText(cfgPath);
                 var config = JsonConvert.DeserializeObject<NetworkConfig>(json);
@@ -52,6 +70,7 @@ public class NetworkConfig
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Unable to read the configuration file, using defaults");
             return new NetworkConfig();
         }
     }
@@ -67,7 +86,30 @@ public class NetworkInformation : IEquatable<NetworkInformation>
 
     public bool Equals(NetworkInformation? other)
     {
-        return WindowsMacAddress.Equals(other?.WindowsMacAddress);
+        return other != null &&
+               string.Equals(WindowsMacAddress, other.WindowsMacAddress, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return Equals(obj as NetworkInformation);
+    }
+
+    public override int GetHashCode()
+    {
+        return WindowsMacAddress?.ToUpperInvariant().GetHashCode() ?? 0;
+    }
+
+    public NetworkInformation Clone()
+    {
+        return new NetworkInformation
+        {
+            InterfaceName = InterfaceName,
+            FriendlyInterfaceName = FriendlyInterfaceName,
+            WindowsMacAddress = WindowsMacAddress,
+            LinuxMacAddress = LinuxMacAddress,
+            Types = new List<string>(Types)
+        };
     }
 }
 
