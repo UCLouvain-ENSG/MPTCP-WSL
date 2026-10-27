@@ -69,8 +69,16 @@ config_proxy() {
             ;;
     esac
 
+    # proxychains only understands numeric addresses in its ProxyList.
+    proxy_ip=$(getent ahostsv4 "$proxy_address" | awk 'NR==1 {print $1}')
+    if [ -z "$proxy_ip" ]; then
+        echo "Cannot resolve the upstream proxy $proxy_address, MPTCP is used directly" >&2
+        return
+    fi
+
     credentials=""
     [ -z "$user" ] || credentials=" $user $password"
+    # The MPTCP hop on 1081 requires its own throw-away credentials, so that nothing else on this host can use it.
     # The file contains the proxy password: keep it readable by root only.
     ( umask 077
       cat > /etc/proxychains.conf <<EOF
@@ -80,12 +88,59 @@ tcp_read_time_out 15000
 tcp_connect_time_out 8000
 
 [ProxyList]
-socks5 127.0.0.1 1081
-socks5 $proxy_address $proxy_port$credentials
+socks5 127.0.0.1 1081 $INNER_USER $INNER_PASS
+socks5 $proxy_ip $proxy_port$credentials
 EOF
     )
     chmod 600 /etc/proxychains.conf
     PROXY_ENABLED=1
+}
+
+# The local SOCKS server and redsocks must never run unauthenticated: take the credentials from the
+# "LocalProxy" section of config.json and give redsocks its login through a root-only configuration.
+config_local_auth() {
+    cfg=$(get_config_path)
+    if [ -z "$cfg" ] || [ ! -f "$cfg" ]; then
+        echo "config.json not found: refusing to start an unauthenticated proxy" >&2
+        exit 1
+    fi
+    LOCAL_USER=$(jq -r '.LocalProxy.user // empty' "$cfg")
+    LOCAL_PASS=$(jq -r '.LocalProxy.password // empty' "$cfg")
+    if [ -z "$LOCAL_USER" ] || [ -z "$LOCAL_PASS" ]; then
+        echo "LocalProxy.user and LocalProxy.password are required in config.json: refusing to start an unauthenticated proxy" >&2
+        exit 1
+    fi
+    case "$LOCAL_USER$LOCAL_PASS" in
+        *[[:space:]]*|*[[:cntrl:]]*|*\"*|*\;*|*\{*|*\}*)
+            echo "LocalProxy credentials must not contain whitespace, control characters, quotes, ';', '{' or '}'" >&2
+            exit 1
+            ;;
+    esac
+    INNER_USER=inner
+    INNER_PASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+    ( umask 077
+      cat > /etc/mptcp-redsocks.conf <<EOF
+base {
+ log_debug = off;
+ log_info = on;
+ log = "stderr";
+ daemon = off;
+ redirector = iptables;
+}
+
+redsocks {
+    local_ip = 0.0.0.0;
+    local_port = 12345;
+
+    ip = 127.0.0.1;
+    port = 1080;
+    type = socks5;
+    login = "$LOCAL_USER";
+    password = "$LOCAL_PASS";
+}
+EOF
+    )
+    chmod 600 /etc/mptcp-redsocks.conf
 }
 
 stop_proxy(){
@@ -112,6 +167,7 @@ delete_iptable
 
 $SUDO sysctl -w net.ipv4.ip_forward=1 > /dev/null
 config_limits
+config_local_auth
 config_iptable
 config_proxy
 redsocks -c /etc/mptcp-redsocks.conf &
@@ -120,10 +176,10 @@ redsocks -c /etc/mptcp-redsocks.conf &
 # networks, so binding them to 0.0.0.0 would expose an open, unauthenticated proxy to the LAN.
 if [ "$PROXY_ENABLED" -eq 1 ]; then
     # redsocks -> 1080 -> (MPTCP socks on 1081) -> upstream proxy
-    proxychains microsocks -i 127.0.0.1 -p 1080 &
-    mptcpize run microsocks -i 127.0.0.1 -p 1081 &
+    proxychains microsocks -i 127.0.0.1 -p 1080 -u "$LOCAL_USER" -P "$LOCAL_PASS" &
+    mptcpize run microsocks -i 127.0.0.1 -p 1081 -u "$INNER_USER" -P "$INNER_PASS" &
 else
-    mptcpize run microsocks -i 127.0.0.1 -p 1080 &
+    mptcpize run microsocks -i 127.0.0.1 -p 1080 -u "$LOCAL_USER" -P "$LOCAL_PASS" &
 fi
 
 wait

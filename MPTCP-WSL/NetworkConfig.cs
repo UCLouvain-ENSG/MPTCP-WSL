@@ -16,6 +16,8 @@ public class NetworkConfig
 
     public List<NetworkInformation> Config { get; set; } = new();
     public Proxy Proxy { get; set; } = new();
+    // Credentials required by the proxy listening on 127.0.0.1:1080 (only user and password are used).
+    public Proxy LocalProxy { get; set; } = new();
     public int SubflowNr { get; set; } = 2;
     public int AddAddrAcceptedNr { get; set; } = 4;
 
