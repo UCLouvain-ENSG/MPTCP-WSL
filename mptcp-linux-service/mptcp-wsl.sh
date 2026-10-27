@@ -163,9 +163,15 @@ delete_iptable(){
     $SUDO iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDSOCKS 2>/dev/null
     $SUDO iptables -t nat -F REDSOCKS 2>/dev/null
     $SUDO iptables -t nat -X REDSOCKS 2>/dev/null
+    # Windows traffic routed through WSL (tray icon): leave through the bridged interfaces with their address.
+    $SUDO iptables -t nat -S POSTROUTING 2>/dev/null | grep -- '--comment mptcp-windows' | sed 's/^-A/-D/' | while read -r rule; do
+        # shellcheck disable=SC2086
+        $SUDO iptables -t nat $rule
+    done
 }
 
 config_iptable(){
+    $SUDO iptables -t nat -A POSTROUTING -s "$(ip -4 -o addr show dev eth0 | awk '{print $4; exit}')" ! -o eth0 -m comment --comment mptcp-windows -j MASQUERADE
     $SUDO iptables -t nat -N REDSOCKS
     $SUDO iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
     $SUDO iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDSOCKS

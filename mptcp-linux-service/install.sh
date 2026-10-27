@@ -16,17 +16,17 @@ for package in jq network-manager redsocks microsocks proxychains mptcpize iptab
 done
 
 # Install everything before starting the service.
+# Explicit modes: this script may run from the Windows drive, where every file looks world-writable, and
+# NetworkManager ignores a dispatcher script that anybody can write to.
 sudo mkdir -p /usr/local/bin/mptcp
-sudo cp mptcp-wsl.sh /usr/local/bin/mptcp/
-sudo chmod +x /usr/local/bin/mptcp/mptcp-wsl.sh
+sudo install -m 755 mptcp-wsl.sh /usr/local/bin/mptcp/mptcp-wsl.sh
 # Run by the tray icon to apply a change of MPTCP mode (aggregation / fallback) at once.
 sudo install -m 755 mptcp-apply-endpoints /usr/local/sbin/mptcp-apply-endpoints
-sudo cp mptcp-redsocks.conf /etc/
-sudo cp mptcp-wsl.service /etc/systemd/system/
+sudo install -m 644 mptcp-redsocks.conf /etc/mptcp-redsocks.conf
+sudo install -m 644 mptcp-wsl.service /etc/systemd/system/mptcp-wsl.service
 
-sudo chmod +x iface_setup
-sudo cp iface_setup /etc/NetworkManager/dispatcher.d/
-sudo cp mptcp-NetworkManager.conf /etc/NetworkManager/conf.d/
+sudo install -m 755 iface_setup /etc/NetworkManager/dispatcher.d/iface_setup
+sudo install -m 644 mptcp-NetworkManager.conf /etc/NetworkManager/conf.d/mptcp-NetworkManager.conf
 
 sudo systemctl disable redsocks
 sudo systemctl disable mptcp.service

@@ -1,12 +1,16 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace mptcp_tray;
 
@@ -45,9 +49,12 @@ internal sealed class TrayApp : IDisposable
     private readonly ToolStripMenuItem _miKernel = new("Service sets the WSL kernel (next start)") { CheckOnClick = true };
     private readonly ToolStripMenuItem _miEndpoints = new("Service manages MPTCP endpoints (next start)") { CheckOnClick = true };
     private readonly ToolStripMenuItem _miLocalAuth = new("Proxy requires a login (restart mptcp-wsl)") { CheckOnClick = true };
+    private readonly ToolStripMenuItem _miRouteAll = new("Route all Windows traffic through WSL");
+    private readonly ToolStripMenuItem _miLinux = new("Install / update the Linux side in WSL");
 
     private Process? _awake;
     private bool _probing;
+    private bool _linuxChecked;
     private Snapshot _last = new(null, null, false, false, Array.Empty<string>());
 
     public TrayApp()
@@ -65,9 +72,9 @@ internal sealed class TrayApp : IDisposable
         {
             _miService, _miWsl, _miProxy, _miNics,
             new ToolStripSeparator(),
-            _miToggle, _miRestart,
+            _miToggle, _miRestart, _miLinux,
             new ToolStripSeparator(),
-            _miMode, _miKeepAwake, _miKernel, _miEndpoints, _miLocalAuth,
+            _miMode, _miRouteAll, _miKeepAwake, _miKernel, _miEndpoints, _miLocalAuth,
             Item($"Copy proxy address ({ProxyHost}:{ProxyPort})", () => Clipboard.SetText($"{ProxyHost}:{ProxyPort}")),
             new ToolStripSeparator(),
             Item("Open config.json", () => Edit(ConfigPath)),
@@ -89,6 +96,8 @@ internal sealed class TrayApp : IDisposable
         _miKernel.Click += (_, _) => SaveConfigBool("ManageKernelLocation", _miKernel.Checked);
         _miEndpoints.Click += (_, _) => SaveConfigBool("ManageEndpoint", _miEndpoints.Checked);
         _miLocalAuth.Click += (_, _) => SaveConfigBool("LocalProxyRequireAuth", _miLocalAuth.Checked);
+        _miRouteAll.Click += (_, _) => ToggleRouteAll();
+        _miLinux.Click += (_, _) => InstallLinuxSide();
 
         _notifyIcon = new NotifyIcon { Icon = _icons[State.Down], Text = "MPTCP Enabler", ContextMenuStrip = menu, Visible = true };
         // A left click shows the same menu as a right click.
@@ -127,6 +136,12 @@ internal sealed class TrayApp : IDisposable
                 : _last.Proxy ? State.Ok
                 : State.Degraded;
             _notifyIcon.Icon = _icons[state];
+            if (!_linuxChecked && _last.Service != null && _last.Wsl)
+            {
+                _linuxChecked = true;
+                _ = Task.Run(OfferLinuxSide);
+            }
+
             // NotifyIcon.Text is limited to 127 characters.
             _notifyIcon.Text = state switch
             {
@@ -202,6 +217,11 @@ internal sealed class TrayApp : IDisposable
         _miToggle.Text = running ? "Disable service" : "Enable service";
         _miToggle.Enabled = _last.Service != null;
         _miRestart.Enabled = running;
+        _miLinux.Enabled = File.Exists(LinuxInstallScript);
+
+        var wsl = FindWslAdapter();
+        _miRouteAll.Enabled = wsl != null;
+        _miRouteAll.Checked = wsl != null && HasDefaultGateway(wsl);
 
         RefreshModeMenu();
         _miKeepAwake.Checked = ReadTrayBool("KeepWSL2Awake", true);
@@ -305,9 +325,181 @@ internal sealed class TrayApp : IDisposable
     {
         var running = _last.Service is ServiceControllerStatus.Running or ServiceControllerStatus.StartPending;
         // Enabling also makes it start with Windows again; disabling leaves it startable by hand.
-        RunElevated(running
-            ? $"sc stop {ServiceName} & sc config {ServiceName} start= demand"
-            : $"sc config {ServiceName} start= auto & sc start {ServiceName}");
+        if (!running)
+        {
+            RunElevated($"sc config {ServiceName} start= auto & sc start {ServiceName}");
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            "Stop the MPTCP Enabler service?\n\n" +
+            "Yes: also undo what it set up: WSL is shut down, the \"MPTCP - ...\" virtual switches are removed and Windows " +
+            "goes back to using the network adapters directly (the network drops for a few seconds), and the route of " +
+            "Windows traffic through WSL is removed.\n" +
+            "No: only stop the service.",
+            "MPTCP", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (answer == DialogResult.Cancel) return;
+        if (answer == DialogResult.No)
+        {
+            RunElevated($"sc stop {ServiceName} & sc config {ServiceName} start= demand");
+            return;
+        }
+
+        var wsl = FindWslAdapter();
+        var undoRoute = wsl != null && HasDefaultGateway(wsl)
+            ? $"Remove-NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex {wsl.GetIPProperties().GetIPv4Properties().Index} -Confirm:$false; " +
+              $"Set-NetIPInterface -InterfaceIndex {wsl.GetIPProperties().GetIPv4Properties().Index} -AutomaticMetric Enabled; "
+            : "";
+        RunElevatedPowerShell(
+            undoRoute +
+            $"Stop-Service {ServiceName}; Set-Service {ServiceName} -StartupType Manual; " +
+            "wsl.exe --shutdown; Start-Sleep 3; " +
+            "Get-VMSwitch | Where-Object { $_.Name -like 'MPTCP - *' } | Remove-VMSwitch -Force");
+    }
+
+    private static readonly string LinuxInstallScript = Path.Combine(AppContext.BaseDirectory, "linux", "install.sh");
+
+    // The installer only copies the Linux files to disk; they have to be installed in the distribution, which is the
+    // user's own, so this is done from here and not by the service.
+    private void InstallLinuxSide()
+    {
+        if (!File.Exists(LinuxInstallScript))
+        {
+            MessageBox.Show(LinuxInstallScript + " does not exist.", "MPTCP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var full = Path.GetFullPath(LinuxInstallScript);
+        var linuxPath = "/mnt/" + char.ToLowerInvariant(full[0]) + full[2..].Replace('\\', '/');
+        try
+        {
+            // A console window stays open at the end, to read what install.sh says (for instance how to enable systemd).
+            Process.Start(new ProcessStartInfo("cmd.exe", $"/c wsl.exe -u root --exec sh \"{linuxPath}\" & echo. & pause")
+                { UseShellExecute = true });
+        }
+        catch (Win32Exception e)
+        {
+            MessageBox.Show(e.Message, "MPTCP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void OfferLinuxSide()
+    {
+        try
+        {
+            if (!File.Exists(LinuxInstallScript)) return;
+            using var check = Process.Start(new ProcessStartInfo("wsl.exe", "-u root --exec test -f /etc/systemd/system/mptcp-wsl.service")
+                { UseShellExecute = false, CreateNoWindow = true });
+            if (check == null || !check.WaitForExit(15000) || check.ExitCode == 0) return;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        _notifyIcon.ContextMenuStrip?.BeginInvoke(() =>
+        {
+            if (MessageBox.Show(
+                    "The Linux side of MPTCP Enabler (the proxy and the network hooks) is not installed in your WSL distribution yet.\n\nInstall it now?",
+                    "MPTCP", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                InstallLinuxSide();
+        });
+    }
+
+    private static NetworkInterface? FindWslAdapter()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .FirstOrDefault(n => n.Name.StartsWith("vEthernet (WSL", StringComparison.OrdinalIgnoreCase) &&
+                                     n.OperationalStatus == OperationalStatus.Up);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static bool HasDefaultGateway(NetworkInterface adapter)
+    {
+        return adapter.GetIPProperties().GatewayAddresses.Any(g =>
+            g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any));
+    }
+
+    // The thesis (6.2) lowers the metric of the WSL network interface so that it carries the default route of Windows:
+    // everything then goes through the WSL VM, where redsocks sends the web traffic into the proxy and the rest leaves
+    // through the bridged interfaces (mptcp-wsl.sh masquerades it). The route is not persistent: it is gone after a reboot.
+    private void ToggleRouteAll()
+    {
+        var adapter = FindWslAdapter();
+        if (adapter == null)
+        {
+            MessageBox.Show("The WSL network adapter does not exist: start WSL first.", "MPTCP", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var index = adapter.GetIPProperties().GetIPv4Properties().Index;
+        if (HasDefaultGateway(adapter))
+        {
+            RunElevatedPowerShell(
+                $"Remove-NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex {index} -Confirm:$false; " +
+                $"Set-NetIPInterface -InterfaceIndex {index} -AutomaticMetric Enabled");
+            return;
+        }
+
+        var address = ReadWslAddress();
+        if (address == null)
+        {
+            MessageBox.Show("Unable to read the address of the WSL VM. Is the Linux side installed and WSL running?", "MPTCP",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (MessageBox.Show(
+                "All the Windows traffic will go through the WSL VM.\n\n" +
+                "Web traffic (ports 80 and 443) goes into the MPTCP proxy, the rest is forwarded and uses the interfaces of the VM. " +
+                "If WSL stops, Windows has no Internet until you untick this entry (or reboot: the route is not kept).\n\nContinue?",
+                "MPTCP", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+
+        RunElevatedPowerShell(
+            $"Set-NetIPInterface -InterfaceIndex {index} -InterfaceMetric 1; " +
+            $"New-NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex {index} -NextHop {address} -RouteMetric 0 -PolicyStore ActiveStore");
+    }
+
+    // The address of the VM on its NAT network, which is the gateway Windows must use to reach the Internet through it.
+    private static string? ReadWslAddress()
+    {
+        try
+        {
+            var info = new ProcessStartInfo("wsl.exe", "-u root --exec ip -4 -o addr show dev eth0")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            using var process = Process.Start(info);
+            if (process == null) return null;
+            var output = process.StandardOutput.ReadToEnd();
+            if (!process.WaitForExit(15000)) return null;
+            var match = Regex.Match(output, @"inet (\d{1,3}(\.\d{1,3}){3})");
+            return match.Success && IPAddress.TryParse(match.Groups[1].Value, out var ip) ? ip.ToString() : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static void RunElevatedPowerShell(string script)
+    {
+        // -EncodedCommand: no quoting issue, and no script file that another process could modify before it runs elevated.
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue';" + script));
+        try
+        {
+            Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+                { Verb = "runas", UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+        }
+        catch (Win32Exception)
+        {
+            // The user declined the UAC prompt.
+        }
     }
 
     private void EnsureAwake()
