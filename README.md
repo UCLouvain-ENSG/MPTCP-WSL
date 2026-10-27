@@ -7,9 +7,15 @@ With this application u will be able to :
 
 1. use all Windows NIC's on WSL2 with proper configuration
 2. use a MPTCP-Proxy running on WSL2.
-3. or even to route all the Windows traffic into WSL.
+3. or even to route all the Windows traffic into WSL. (The thesis does this by lowering the metric of the WSL network interface in Windows so that it carries the default route; this step is not implemented in the current service, see the Appendix.)
 4. use a second proxy to make non compatible distant server compatible.
 
+
+## Thesis
+This project is the implementation part of the master thesis of Bilal Brarou, supervised by Tom Barbette (UCLouvain, 2023-2024): [*Enabling MPTCP on Windows through WSL*](https://thesis.dial.uclouvain.be/server/api/core/bitstreams/9a1aed97-1f94-4503-8459-59c06c59a41a/content). It explains the design choices (chapter 4: exposing the Windows interfaces to WSL2 with one Hyper-V switch per NIC, and mapping Windows and WSL interfaces by MAC address; chapter 5: redsocks and proxy chaining; chapter 6: routing Windows traffic through WSL) and the performance evaluation (chapter 7).
+
+Reference:
+> B. Brarou, *Enabling MPTCP on Windows through WSL*, Master's thesis in Computer Science, École polytechnique de Louvain, UCLouvain, 2024. https://thesis.dial.uclouvain.be/server/api/core/bitstreams/9a1aed97-1f94-4503-8459-59c06c59a41a/content
 
 ## Requirements
 To run properly this application need to have :
@@ -68,5 +74,6 @@ Each endpoints can be configured as follow:
 - The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
 - If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and always require authentication (`LocalProxy`).
 - The WSL2 VM stops when no WSL process is running, and the proxy goes with it. Keep a `wsl` session open (or run a long-lived command such as `wsl -- sleep infinity`) while you use the proxy. The service re-attaches the interfaces every time the VM starts.
+- Routing all Windows traffic through WSL (thesis, section 6.2) is not done by the service. It needs the default route of Windows to go through the WSL `eth0` gateway, which means lowering the metric of the WSL network interface itself (not of the route). Until this is automated, point your applications at the SOCKS proxy instead.
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.
 - U could use MPTCP on other distribution like Debian or Kali or other since it will share the same kernel, the most important thing is that the `mptcp-wsl.service` is running on a Ubuntu distribution.
