@@ -1,6 +1,6 @@
 #!/bin/sh
 # Apply the MPTCP mode now: re-create the MPTCP endpoint of every interface with the flags listed in its "Types"
-# in config.json, and put the preferred interface first in the default routes.
+# in config.json, and make the non-backup interfaces the preferred ones for the first subflow.
 #
 # The NetworkManager hook (iface_setup) only does this when an interface obtains an address, so the tray icon
 # runs this script after it changes the mode:
@@ -35,39 +35,63 @@ if [ -z "$cfg" ] || [ ! -f "$cfg" ] || ! jq -e . "$cfg" >/dev/null 2>&1; then
     exit 1
 fi
 
-n=0
-for dev in $(ls /sys/class/net | grep -E '^eth[1-9][0-9]*$' | sort -V); do
-    addr=$(ip -4 -o addr show dev "$dev" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)
-    [ -n "$addr" ] || continue
-    n=$((n + 1))
-    mac=$(ip link show "$dev" | awk '/link\/ether/ {print $2}' | tr 'a-f' 'A-F' | sed 's/:/-/g')
-    types=$(jq -r --arg mac "$mac" '[.Config[] | select(.LinuxMacAddress == $mac) | .Types[]?] | join(" ")' "$cfg")
-
-    # Only the flags the kernel knows; anything else in the file is ignored.
-    flags=""
-    for t in $types; do
+# Flags of an interface, from the "Types" of the config entry with the same MAC address.
+flags_of() {
+    mac=$(ip link show "$1" | awk '/link\/ether/ {print $2}' | tr 'a-f' 'A-F' | sed 's/:/-/g')
+    out=""
+    for t in $(jq -r --arg mac "$mac" '[.Config[] | select(.LinuxMacAddress == $mac) | .Types[]?] | join(" ")' "$cfg"); do
+        # Only the flags the kernel knows; anything else in the file is ignored.
         case "$t" in
-            subflow|signal|backup|fullmesh) flags="$flags $t" ;;
+            subflow|signal|backup|fullmesh) out="$out $t" ;;
         esac
     done
+    echo "$out"
+}
 
+devs=""
+for dev in $(ls /sys/class/net | grep -E '^eth[1-9][0-9]*$' | sort -V); do
+    [ -n "$(ip -4 -o addr show dev "$dev" scope global)" ] && devs="$devs $dev"
+done
+[ -n "$devs" ] || { echo "no attached interface has an address yet" >&2; exit 1; }
+
+# 1. Route metrics. Every interface has a route to the LAN and a default route, and the first subflow leaves
+#    through the best of them, so the non-backup interfaces get the lowest metric. The metric is set on the
+#    NetworkManager connection, which applies it to all the routes of the interface (and keeps it across lease
+#    renewals); routes added by hand would be re-created by NetworkManager next to the new ones.
+n=0
+for dev in $devs; do
+    n=$((n + 1))
+    case " $(flags_of "$dev") " in
+        *" backup "*) metric=$((200 + n)) ;;
+        *) metric=$((100 + n)) ;;
+    esac
+    con=$(nmcli -g GENERAL.CONNECTION device show "$dev" 2>/dev/null)
+    if [ -n "$con" ] && [ "$con" != "--" ]; then
+        nmcli connection modify "$con" ipv4.route-metric "$metric" && nmcli device reapply "$dev" >/dev/null 2>&1
+    else
+        echo "$dev is not managed by NetworkManager: route metrics left as they are" >&2
+    fi
+    # Default routes added by hand (by an older version of this script, or mpup.sh) would shadow the new metrics.
+    ip route show default dev "$dev" | grep -v 'proto dhcp' | while read -r route; do
+        # shellcheck disable=SC2086
+        ip route del $route 2>/dev/null
+    done
+done
+# reapply makes NetworkManager run its dispatcher hook, which also re-creates the endpoints.
+sleep 2
+
+# 2. Endpoints.
+n=0
+for dev in $devs; do
+    n=$((n + 1))
+    addr=$(ip -4 -o addr show dev "$dev" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)
+    flags=$(flags_of "$dev")
     for id in $(ip mptcp endpoint show | awk -v d="$dev" '$0 ~ (" dev " d "( |$)") {print $3}'); do
         ip mptcp endpoint delete id "$id"
     done
     # shellcheck disable=SC2086
     ip mptcp endpoint add "$addr" dev "$dev" $flags
-
-    # The first subflow leaves through the best default route, so give the non-backup interfaces the lowest metrics.
-    case " $flags " in
-        *" backup "*) metric=$((200 + n)) ;;
-        *) metric=$((100 + n)) ;;
-    esac
-    gw=$(ip route show default dev "$dev" | awk '/via/ {print $3; exit}')
-    if [ -n "$gw" ]; then
-        while ip route del default dev "$dev" 2>/dev/null; do :; done
-        ip route add default via "$gw" dev "$dev" metric "$metric"
-    fi
-    echo "$dev $addr:${flags:- (no flag)} metric $metric"
+    echo "$dev $addr:${flags:- (no flag)}"
 done
-
-[ "$n" -gt 0 ] || { echo "no attached interface has an address yet" >&2; exit 1; }
+gw=$(ip route show default | awk '/via/ {print $3; exit}')
+[ -z "$gw" ] || echo "first subflow towards $gw leaves through: $(ip route get "$gw" 2>/dev/null | head -1)"
