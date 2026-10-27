@@ -14,11 +14,12 @@ With this application u will be able to :
 ## Requirements
 To run properly this application need to have :
 
-- Windows 10/11 x86 Pro Version
+- Windows 10/11 x64 Pro (Hyper-V is required)
 - Windows Subsystem Linux enabled and updated
 - Hyper-V enabled
-- Have an Ubuntu distribution installed, with systemd enabled (add `[boot]` / `systemd=true` to `/etc/wsl.conf` in that distribution, then run `wsl --shutdown`).
-- Have [.NET 7.0 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-7.0.16-windows-x86-installer) installed.
+- An Ubuntu distribution installed in WSL2. It does not need to be the default one. systemd must be enabled in it (`install.sh` tells you how if it is not).
+
+There is nothing else to install on Windows: the service is self-contained, so no .NET runtime is needed.
 
 ## Pre-installation setup
 Windows will automatically turn off wifi when Ethernet is plugged in. If you want to try MPTCP over Wifi + Ethernet (or 4G through USB, all the same) you must disable this behavior :
@@ -29,19 +30,29 @@ Windows will automatically turn off wifi when Ethernet is plugged in. If you wan
 
 ## Installation
 
-### Step 1
-Download the installer provider on the release sections of this repo and to run it as administator. it will install the MPTCP Enabler service that will be in charge of attaching all Network Interfaces into WSL2. At the end of the installation. u will able to see that the MPTCP Enabler Service is running.  
+### Step 1: Windows
+Download `mptcp-installer.msi` from the release section of this repo and run it as administrator. It installs and starts the *MPTCP Enabler* service, and from then on the service does the following by itself:
+
+- creates one Hyper-V external switch per physical NIC ("MPTCP - <NIC>") and attaches them all to the WSL2 VM, again each time the VM starts and when a NIC appears;
+- creates `config.json` (see below) and adds every new NIC to it;
+- sets `kernel=` in your `.wslconfig` to the bundled MPTCP kernel (unless `ManageKernelLocation` is `false`). The new kernel is used after the next `wsl --shutdown`.
+
+The service runs as Local System; it finds your Windows profile on its own (see the Appendix), so there is no need to configure it to run as your user.
 ![MPTCP Service](https://i.ibb.co/JFnKSyY/Capture-d-cran-2024-03-03-161257.png)
-### Step 2
-Configure the service to be runned as a Windows user and not Local System. here's a [website](https://docs.microfocus.com/SM/9.61/Hybrid/Content/serversetup/tasks/configure_the_service_manager_service_to_run_as_a_windows_user.htm) that show how to do it.
-### Step 3
-Set the default distribution to Ubuntu by running : `wsl --set-default <Dist-Name>` and run `./install.sh` script on the Ubuntu distribution that will install script that will allow configure properly each network interface on WSL2, install the `mptcp-wsl.service` that will run a  proxy and redsocks to allow to redirect all the Windows traffic into a proxy.
+
+### Step 2: Linux
+In the Ubuntu distribution, run `./install.sh` from `mptcp-linux-service`. If systemd is not enabled, it stops and tells you what to add to `/etc/wsl.conf`; run `wsl --shutdown`, then run it again. It installs the packages, the NetworkManager hook that sets up the routing table and MPTCP endpoint of each interface, and the `mptcp-wsl.service` that runs the local SOCKS proxy and redsocks to redirect Windows traffic into a proxy.
+
+### Step 3: Credentials
+Edit `config.json` and fill in `LocalProxy` (`user` and `password`). It is required: the local proxy does not start without it. Optionally fill in `Proxy` to chain to a distant MPTCP-compatible proxy. Then run `sudo systemctl restart mptcp-wsl` in the distribution.
+
+Point your Windows application at the SOCKS5 proxy `127.0.0.1:1080` with the `LocalProxy` credentials.
 
 ## Configuration file Documentation
 After the installation a config file named `config.json` should be created automatically and located at the  
 `C:\Users\<USER>\AppData\Local\MPTCP\`folder and is structured as follow :
 
-- **ManageKernelLocation** : If set to true, the application automatically put the correct path of the MPTCP Compatible Kernel located at : `C:\Program Files (x86)\MPTCP\MPTCP Enabler\bzImage`
+- **ManageKernelLocation** : If set to true, the application automatically puts the path of the MPTCP compatible kernel (`C:\Program Files (x86)\MPTCP\MPTCP Enabler\bzImage`) in `.wslconfig` and overwrites any other `kernel=` line there. Set it to false to use your own kernel.
 - **ManageEndpoint** : if set to true, the endpoint settings will be applied into WSL.
 - **Config**: Contains information about each NIC, endpoint parameters can be set on the Types section
 - **Proxy**: this section is about using a distant MPTCP-Compatible Proxy. This settings will not be took into account if left blank.
@@ -56,5 +67,6 @@ Each endpoints can be configured as follow:
 ## Appendix
 - The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
 - If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and always require authentication (`LocalProxy`).
+- The WSL2 VM stops when no WSL process is running, and the proxy goes with it. Keep a `wsl` session open (or run a long-lived command such as `wsl -- sleep infinity`) while you use the proxy. The service re-attaches the interfaces every time the VM starts.
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.
 - U could use MPTCP on other distribution like Debian or Kali or other since it will share the same kernel, the most important thing is that the `mptcp-wsl.service` is running on a Ubuntu distribution.
