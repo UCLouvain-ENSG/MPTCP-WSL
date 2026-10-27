@@ -55,7 +55,7 @@ Edit `config.json` and fill in `LocalProxy` (`user` and `password`). It is requi
 Point your Windows application at the SOCKS5 proxy `127.0.0.1:1080` with the `LocalProxy` credentials.
 
 ### Tray icon
-The installer also adds a tray icon (`mptcp_tray.exe`) that starts at logon. It runs as you, not as Local System. Its colour is the state: green when the service runs and the proxy answers on `127.0.0.1:1080`, orange when the service runs but the proxy does not answer (the WSL VM is stopped or still starting), red when the service is stopped. Click it for:
+The installer also adds a tray icon (`mptcp_tray.exe`) that starts at logon, and a *MPTCP Enabler* entry in the Start menu to start it by hand. Windows 11 puts new tray icons behind the `^` chevron: drag it out, or turn it on under Settings > Personalization > Taskbar > Other system tray icons. It runs as you, not as Local System. Its colour is the state: green when the service runs and the proxy answers on `127.0.0.1:1080`, orange when the service runs but the proxy does not answer (the WSL VM is stopped or still starting), red when the service is stopped. Click it for:
 
 - the state of the service, of the WSL VM and of the proxy, and the interfaces listed in `config.json`;
 - **Enable / Disable service** and **Restart service** (Windows asks for administrator rights, because starting and stopping a service needs them);
