@@ -1,0 +1,73 @@
+#!/bin/sh
+# Apply the MPTCP mode now: re-create the MPTCP endpoint of every interface with the flags listed in its "Types"
+# in config.json, and put the preferred interface first in the default routes.
+#
+# The NetworkManager hook (iface_setup) only does this when an interface obtains an address, so the tray icon
+# runs this script after it changes the mode:
+#   aggregation: every interface has "subflow", all of them carry traffic;
+#   fallback:    the primary interface has "subflow", the others "subflow backup" and only carry traffic
+#                when the primary one fails.
+# Run as root.
+
+[ "$(id -u)" -eq 0 ] || { echo "must be run as root" >&2; exit 1; }
+
+# Print the path of config.json of the Windows user, as seen from WSL (same lookup as iface_setup).
+get_config_path() {
+    cmd_exe=""
+    cmd_drive=""
+    for drive in /mnt/*; do
+        if [ -x "$drive/Windows/System32/cmd.exe" ]; then
+            cmd_exe="$drive/Windows/System32/cmd.exe"
+            cmd_drive="$drive"
+            break
+        fi
+    done
+    [ -n "$cmd_exe" ] || return 1
+    win_profile=$(cd "$cmd_drive" && "$cmd_exe" /c "echo %USERPROFILE%" 2>/dev/null </dev/null | tr -d '\r')
+    [ -n "$win_profile" ] || return 1
+    unix_profile=$(wslpath -u "$win_profile") || return 1
+    echo "$unix_profile/AppData/Local/MPTCP/config.json"
+}
+
+cfg=$(get_config_path)
+if [ -z "$cfg" ] || [ ! -f "$cfg" ] || ! jq -e . "$cfg" >/dev/null 2>&1; then
+    echo "config.json not found or unreadable" >&2
+    exit 1
+fi
+
+n=0
+for dev in $(ls /sys/class/net | grep -E '^eth[1-9][0-9]*$' | sort -V); do
+    addr=$(ip -4 -o addr show dev "$dev" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$addr" ] || continue
+    n=$((n + 1))
+    mac=$(ip link show "$dev" | awk '/link\/ether/ {print $2}' | tr 'a-f' 'A-F' | sed 's/:/-/g')
+    types=$(jq -r --arg mac "$mac" '[.Config[] | select(.LinuxMacAddress == $mac) | .Types[]?] | join(" ")' "$cfg")
+
+    # Only the flags the kernel knows; anything else in the file is ignored.
+    flags=""
+    for t in $types; do
+        case "$t" in
+            subflow|signal|backup|fullmesh) flags="$flags $t" ;;
+        esac
+    done
+
+    for id in $(ip mptcp endpoint show | awk -v d="$dev" '$0 ~ (" dev " d "( |$)") {print $3}'); do
+        ip mptcp endpoint delete id "$id"
+    done
+    # shellcheck disable=SC2086
+    ip mptcp endpoint add "$addr" dev "$dev" $flags
+
+    # The first subflow leaves through the best default route, so give the non-backup interfaces the lowest metrics.
+    case " $flags " in
+        *" backup "*) metric=$((200 + n)) ;;
+        *) metric=$((100 + n)) ;;
+    esac
+    gw=$(ip route show default dev "$dev" | awk '/via/ {print $3; exit}')
+    if [ -n "$gw" ]; then
+        while ip route del default dev "$dev" 2>/dev/null; do :; done
+        ip route add default via "$gw" dev "$dev" metric "$metric"
+    fi
+    echo "$dev $addr:${flags:- (no flag)} metric $metric"
+done
+
+[ "$n" -gt 0 ] || { echo "no attached interface has an address yet" >&2; exit 1; }

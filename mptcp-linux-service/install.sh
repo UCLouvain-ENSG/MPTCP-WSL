@@ -19,6 +19,8 @@ done
 sudo mkdir -p /usr/local/bin/mptcp
 sudo cp mptcp-wsl.sh /usr/local/bin/mptcp/
 sudo chmod +x /usr/local/bin/mptcp/mptcp-wsl.sh
+# Run by the tray icon to apply a change of MPTCP mode (aggregation / fallback) at once.
+sudo install -m 755 mptcp-apply-endpoints /usr/local/sbin/mptcp-apply-endpoints
 sudo cp mptcp-redsocks.conf /etc/
 sudo cp mptcp-wsl.service /etc/systemd/system/
 

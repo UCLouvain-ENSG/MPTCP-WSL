@@ -59,6 +59,7 @@ The installer also adds a tray icon (`mptcp_tray.exe`) that starts at logon. It 
 
 - the state of the service, of the WSL VM and of the proxy, and the interfaces listed in `config.json`;
 - **Enable / Disable service** and **Restart service** (Windows asks for administrator rights, because starting and stopping a service needs them);
+- **MPTCP mode**: *aggregation* (the default: every interface opens a subflow and they carry traffic together) or *fallback* with the interface of your choice first (the others only carry traffic if it fails). It sets the `Types` of each interface in `config.json` and applies it at once through `mptcp-apply-endpoints`, which `install.sh` installs in the distribution;
 - **Keep WSL running** (on by default): the WSL2 VM stops a minute after the last `wsl` process exits, and the proxy goes with it. The tray holds a hidden `wsl --exec sleep infinity` for you. This has to be done as your user: a Local System service cannot keep your VM alive. The setting is stored in `%LOCALAPPDATA%\MPTCP\tray.json`;
 - **Service sets the WSL kernel** and **Service manages MPTCP endpoints**: `ManageKernelLocation` and `ManageEndpoint` of `config.json`, applied the next time the service starts;
 - copy the proxy address, open `config.json`, the log or `.wslconfig`, and restart WSL.
@@ -71,17 +72,18 @@ After the installation a config file named `config.json` should be created autom
 - **ManageEndpoint** : if set to true, the endpoint settings will be applied into WSL.
 - **Config**: Contains information about each NIC, endpoint parameters can be set on the Types section
 - **Proxy**: this section is about using a distant MPTCP-Compatible Proxy. This settings will not be took into account if left blank.
-- **LocalProxy**: `user` and `password` required by the local SOCKS5 proxy on `127.0.0.1:1080` (point Windows applications such as Steam at it). `mptcp-wsl.sh` refuses to start the local proxy while these are empty, so the proxy is never exposed unauthenticated.
+- **LocalProxy**: `user` and `password` required by the local SOCKS5 proxy on `127.0.0.1:1080` (point Windows applications such as Steam at it). `mptcp-wsl.sh` refuses to start while these are empty, so the proxy is never exposed unauthenticated by accident.
+- **LocalProxyRequireAuth**: `true` by default. Set it to `false` for clients that cannot log in to a SOCKS5 proxy (Firefox, for instance): the proxy then accepts any client on this computer, without a password, and `LocalProxy` is not needed. It still listens on `127.0.0.1` only, but every program and every user of this computer can then use your connections through the upstream proxy. Run `sudo systemctl restart mptcp-wsl` to apply.
 - **SubflowNr**: This restricts the Multipath TCP connection to use up to  `n` different subflows. Servers should protect themselves by setting this limit to a few subflows. Most use cases would work well with 2 or 4 subflows.
 - **AddAddrAcceptedNr**: This parameter limits the number of addresses that are learned over each Multipath TCP connection. This parameter could be used to protect the Multipath TCP implementation against attacks where two many addresses are advertised. Most use cases would work with 4 accepted addresses.
 
-Each endpoints can be configured as follow:
+Each endpoints can be configured as follow (a new interface starts with `subflow` only, which is aggregation; the tray icon switches between aggregation and fallback for you):
 -   `subflow`. When this flag is set, the path manager will try to create a subflow over this interface when a Multipath TCP is created or the interface becomes active while there was an ongoing Multipath TCP connection. This flag is mainly useful for clients.
 -   `signal`. When this flag is set, the path manager will announce the address of the endpoint over any Multipath TCP connection created using other addresses. This flag can be used on clients or servers. It is mainly useful on servers that have multiple addresses.
 -   `backup`. This flag can be combined with the two other flags. When combined with the  `subflow` flag, it indicates that a backup subflow will be created. When combined with the  `signal` flag, it indicates that the address will be advertised as a backup address.
 ## Appendix
 - The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
-- If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and always require authentication (`LocalProxy`).
+- If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and require authentication (`LocalProxy`) unless `LocalProxyRequireAuth` is `false`.
 - The WSL2 VM stops when no WSL process is running, and the proxy goes with it. The tray icon keeps it running for you (**Keep WSL running**). Without the tray, keep a `wsl` session open yourself, for example `wsl -- sleep infinity`. The service re-attaches the interfaces every time the VM starts.
 - Routing all Windows traffic through WSL (thesis, section 6.2) is not done by the service. It needs the default route of Windows to go through the WSL `eth0` gateway, which means lowering the metric of the WSL network interface itself (not of the route). Until this is automated, point your applications at the SOCKS proxy instead.
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.

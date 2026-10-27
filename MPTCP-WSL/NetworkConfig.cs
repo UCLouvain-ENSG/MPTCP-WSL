@@ -6,6 +6,8 @@ public class NetworkConfig
 {
     private readonly object _sync = new();
     public bool ManageEndpoint = true;
+    // false lets any local client use the proxy on 127.0.0.1:1080 without logging in (browsers cannot log in to SOCKS5).
+    public bool LocalProxyRequireAuth = true;
     public bool ManageKernelLocation = true;
 
     public NetworkConfig()

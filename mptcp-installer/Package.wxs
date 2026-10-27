@@ -3,7 +3,7 @@
 <!-- Define the variables in "$(var.*) expressions" -->
 <?define Name = "MPTCP Enabler" ?>
 <?define Manufacturer = "MPTCP" ?>
-<?define Version = "1.2.0.0" ?>
+<?define Version = "1.3.0.0" ?>
 <?define UpgradeCode = "9ED3FF33-8718-444E-B44B-69A2344B7E98" ?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">

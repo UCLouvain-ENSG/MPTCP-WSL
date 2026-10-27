@@ -96,26 +96,37 @@ EOF
     PROXY_ENABLED=1
 }
 
-# The local SOCKS server and redsocks must never run unauthenticated: take the credentials from the
-# "LocalProxy" section of config.json and give redsocks its login through a root-only configuration.
+# The local SOCKS server and redsocks require the credentials of the "LocalProxy" section of config.json,
+# unless "LocalProxyRequireAuth" is explicitly false (for clients such as browsers that cannot log in to a
+# SOCKS proxy). Either way they only listen on the loopback interface. redsocks gets its login through a
+# root-only configuration.
 config_local_auth() {
     cfg=$(get_config_path)
     if [ -z "$cfg" ] || [ ! -f "$cfg" ]; then
         echo "config.json not found: refusing to start an unauthenticated proxy" >&2
         exit 1
     fi
-    LOCAL_USER=$(jq -r '.LocalProxy.user // empty' "$cfg")
-    LOCAL_PASS=$(jq -r '.LocalProxy.password // empty' "$cfg")
-    if [ -z "$LOCAL_USER" ] || [ -z "$LOCAL_PASS" ]; then
-        echo "LocalProxy.user and LocalProxy.password are required in config.json: refusing to start an unauthenticated proxy" >&2
-        exit 1
-    fi
-    case "$LOCAL_USER$LOCAL_PASS" in
-        *[[:space:]]*|*[[:cntrl:]]*|*\"*|*\;*|*\{*|*\}*)
-            echo "LocalProxy credentials must not contain whitespace, control characters, quotes, ';', '{' or '}'" >&2
+    LOCAL_USER=""
+    LOCAL_PASS=""
+    REDSOCKS_LOGIN=""
+    if [ "$(jq -r 'if .LocalProxyRequireAuth == false then "false" else "true" end' "$cfg")" = "false" ]; then
+        echo "LocalProxyRequireAuth is false: the local proxy on 127.0.0.1:1080 accepts any local client" >&2
+    else
+        LOCAL_USER=$(jq -r '.LocalProxy.user // empty' "$cfg")
+        LOCAL_PASS=$(jq -r '.LocalProxy.password // empty' "$cfg")
+        if [ -z "$LOCAL_USER" ] || [ -z "$LOCAL_PASS" ]; then
+            echo "LocalProxy.user and LocalProxy.password are required in config.json (or set LocalProxyRequireAuth to false): refusing to start an unauthenticated proxy" >&2
             exit 1
-            ;;
-    esac
+        fi
+        case "$LOCAL_USER$LOCAL_PASS" in
+            *[[:space:]]*|*[[:cntrl:]]*|*\"*|*\;*|*\{*|*\}*)
+                echo "LocalProxy credentials must not contain whitespace, control characters, quotes, ';', '{' or '}'" >&2
+                exit 1
+                ;;
+        esac
+        REDSOCKS_LOGIN="    login = \"$LOCAL_USER\";
+    password = \"$LOCAL_PASS\";"
+    fi
     INNER_USER=inner
     INNER_PASS=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
     ( umask 077
@@ -135,8 +146,7 @@ redsocks {
     ip = 127.0.0.1;
     port = 1080;
     type = socks5;
-    login = "$LOCAL_USER";
-    password = "$LOCAL_PASS";
+$REDSOCKS_LOGIN
 }
 EOF
     )
@@ -172,14 +182,23 @@ config_iptable
 config_proxy
 redsocks -c /etc/mptcp-redsocks.conf &
 
+# Start the local SOCKS server on 1080 behind the command prefix given as arguments, with or without login.
+start_local_socks() {
+    if [ -n "$LOCAL_USER" ]; then
+        "$@" microsocks -i 127.0.0.1 -p 1080 -u "$LOCAL_USER" -P "$LOCAL_PASS" &
+    else
+        "$@" microsocks -i 127.0.0.1 -p 1080 &
+    fi
+}
+
 # The SOCKS servers only listen on the loopback interface: the vNICs are bridged onto the physical
-# networks, so binding them to 0.0.0.0 would expose an open, unauthenticated proxy to the LAN.
+# networks, so binding them to 0.0.0.0 would expose an open proxy to the LAN.
 if [ "$PROXY_ENABLED" -eq 1 ]; then
     # redsocks -> 1080 -> (MPTCP socks on 1081) -> upstream proxy
-    proxychains microsocks -i 127.0.0.1 -p 1080 -u "$LOCAL_USER" -P "$LOCAL_PASS" &
+    start_local_socks proxychains
     mptcpize run microsocks -i 127.0.0.1 -p 1081 -u "$INNER_USER" -P "$INNER_PASS" &
 else
-    mptcpize run microsocks -i 127.0.0.1 -p 1080 -u "$LOCAL_USER" -P "$LOCAL_PASS" &
+    start_local_socks mptcpize run
 fi
 
 wait

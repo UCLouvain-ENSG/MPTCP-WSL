@@ -130,7 +130,8 @@ public class NetworkMonitor
                         LinuxMacAddress = MacAddressUtil.Transform(windowsMac),
                         FriendlyInterfaceName = adapter["NetConnectionID"].ToString()!,
                         InterfaceName = adapter["Name"].ToString()!,
-                        Types = new List<string>()
+                        // Aggregation by default: every interface opens a subflow.
+                        Types = new List<string> { "subflow" }
                     });
                 }
         }

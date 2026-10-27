@@ -40,9 +40,11 @@ internal sealed class TrayApp : IDisposable
     private readonly ToolStripMenuItem _miNics = Label();
     private readonly ToolStripMenuItem _miToggle = new();
     private readonly ToolStripMenuItem _miRestart = new("Restart service");
+    private readonly ToolStripMenuItem _miMode = new("MPTCP mode");
     private readonly ToolStripMenuItem _miKeepAwake = new("Keep WSL running") { CheckOnClick = true };
     private readonly ToolStripMenuItem _miKernel = new("Service sets the WSL kernel (next start)") { CheckOnClick = true };
     private readonly ToolStripMenuItem _miEndpoints = new("Service manages MPTCP endpoints (next start)") { CheckOnClick = true };
+    private readonly ToolStripMenuItem _miLocalAuth = new("Proxy requires a login (restart mptcp-wsl)") { CheckOnClick = true };
 
     private Process? _awake;
     private bool _probing;
@@ -65,7 +67,7 @@ internal sealed class TrayApp : IDisposable
             new ToolStripSeparator(),
             _miToggle, _miRestart,
             new ToolStripSeparator(),
-            _miKeepAwake, _miKernel, _miEndpoints,
+            _miMode, _miKeepAwake, _miKernel, _miEndpoints, _miLocalAuth,
             Item($"Copy proxy address ({ProxyHost}:{ProxyPort})", () => Clipboard.SetText($"{ProxyHost}:{ProxyPort}")),
             new ToolStripSeparator(),
             Item("Open config.json", () => Edit(ConfigPath)),
@@ -86,6 +88,7 @@ internal sealed class TrayApp : IDisposable
         };
         _miKernel.Click += (_, _) => SaveConfigBool("ManageKernelLocation", _miKernel.Checked);
         _miEndpoints.Click += (_, _) => SaveConfigBool("ManageEndpoint", _miEndpoints.Checked);
+        _miLocalAuth.Click += (_, _) => SaveConfigBool("LocalProxyRequireAuth", _miLocalAuth.Checked);
 
         _notifyIcon = new NotifyIcon { Icon = _icons[State.Down], Text = "MPTCP Enabler", ContextMenuStrip = menu, Visible = true };
         // A left click shows the same menu as a right click.
@@ -200,9 +203,102 @@ internal sealed class TrayApp : IDisposable
         _miToggle.Enabled = _last.Service != null;
         _miRestart.Enabled = running;
 
+        RefreshModeMenu();
         _miKeepAwake.Checked = ReadTrayBool("KeepWSL2Awake", true);
         _miKernel.Checked = ReadConfigBool("ManageKernelLocation", true);
         _miEndpoints.Checked = ReadConfigBool("ManageEndpoint", true);
+        _miLocalAuth.Checked = ReadConfigBool("LocalProxyRequireAuth", true);
+    }
+
+    // The mode is the "Types" flags of each interface in config.json, which the Linux side applies:
+    // aggregation = every interface has "subflow"; fallback = all but the primary one also have "backup".
+    private void RefreshModeMenu()
+    {
+        var nics = ReadNicModes();
+        var backups = nics.Count(n => n.Types.Contains("backup"));
+        var primary = backups > 0 && nics.Count - backups == 1 ? nics.FindIndex(n => !n.Types.Contains("backup")) : -1;
+        var custom = backups > 0 && primary < 0;
+
+        _miMode.Text = "MPTCP mode: " + (custom ? "custom" : primary >= 0 ? $"fallback ({nics[primary].Name} first)" : "aggregation");
+        _miMode.Enabled = nics.Count > 0;
+        _miMode.DropDownItems.Clear();
+
+        var aggregation = Item("Aggregation: use all interfaces together", () => SetMode(-1));
+        aggregation.Checked = !custom && primary < 0;
+        _miMode.DropDownItems.Add(aggregation);
+        for (var i = 0; i < nics.Count; i++)
+        {
+            var index = i;
+            var fallback = Item($"Fallback: {nics[i].Name} first, the others only as backup", () => SetMode(index));
+            fallback.Checked = primary == i;
+            _miMode.DropDownItems.Add(fallback);
+        }
+    }
+
+    private async void SetMode(int primary)
+    {
+        try
+        {
+            if (JsonNode.Parse(File.ReadAllText(ConfigPath)) is not JsonObject cfg || cfg["Config"] is not JsonArray nics) return;
+            for (var i = 0; i < nics.Count; i++)
+            {
+                if (nics[i] is not JsonObject nic) continue;
+                // Keep any other flag (signal, fullmesh) the user put there.
+                var types = ((nic["Types"] as JsonArray)?.Select(t => t?.GetValue<string>() ?? "") ?? Enumerable.Empty<string>())
+                    .Where(t => t != "" && t != "backup" && t != "subflow").ToList();
+                types.Insert(0, "subflow");
+                if (primary >= 0 && i != primary) types.Add("backup");
+                nic["Types"] = new JsonArray(types.Select(t => (JsonNode?)JsonValue.Create(t)).ToArray());
+            }
+
+            WriteJson(ConfigPath, cfg);
+        }
+        catch (Exception e)
+        {
+            MessageBox.Show("Unable to update config.json: " + e.Message, "MPTCP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var applied = await Task.Run(ApplyMode);
+        _notifyIcon.ShowBalloonTip(4000, "MPTCP",
+            !applied ? "Saved. WSL could not apply it now; it applies when the interfaces next get an address."
+            : primary < 0 ? "Aggregation: all interfaces are used together."
+            : "Fallback: the other interfaces only carry traffic if the first one fails.",
+            ToolTipIcon.Info);
+    }
+
+    // Installed by install.sh; re-creates the MPTCP endpoints from config.json in the running VM.
+    private static bool ApplyMode()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("wsl.exe", "-u root -- /usr/local/sbin/mptcp-apply-endpoints")
+                { UseShellExecute = false, CreateNoWindow = true });
+            return process != null && process.WaitForExit(30000) && process.ExitCode == 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static List<NicMode> ReadNicModes()
+    {
+        var result = new List<NicMode>();
+        try
+        {
+            if (JsonNode.Parse(File.ReadAllText(ConfigPath)) is JsonObject cfg && cfg["Config"] is JsonArray nics)
+                foreach (var nic in nics)
+                    result.Add(new NicMode(
+                        nic?["FriendlyInterfaceName"]?.GetValue<string>() ?? nic?["InterfaceName"]?.GetValue<string>() ?? "?",
+                        (nic?["Types"] as JsonArray)?.Select(t => t?.GetValue<string>() ?? "").ToArray() ?? Array.Empty<string>()));
+        }
+        catch (Exception)
+        {
+            // Missing or being rewritten by the service.
+        }
+
+        return result;
     }
 
     private void ToggleService()
@@ -410,6 +506,8 @@ internal sealed class TrayApp : IDisposable
         Degraded,
         Down
     }
+
+    private sealed record NicMode(string Name, string[] Types);
 
     private sealed record Snapshot(ServiceControllerStatus? Service, ServiceStartMode? StartMode, bool Proxy, bool Wsl, string[] Nics);
 }
