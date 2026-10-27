@@ -1,6 +1,10 @@
 ﻿<Project Sdk="WixToolset.Sdk/4.0.2">
   <PropertyGroup>
     <TargetFramework>net7.0</TargetFramework>
+    <!-- Output of publishing mptcp-enabler for win-x64 in Release, self-contained. Spelled out because the SDK version changes the project TargetDir. -->
+    <!-- ICE80: the service exe is 64-bit but the install path stays under Program Files (x86), which WslConfigManager and the README rely on. -->
+    <SuppressIces>ICE80</SuppressIces>
+    <DefineConstants>$(DefineConstants);EnablerPublishDir=$(MSBuildThisFileDirectory)..\mptcp-enabler\bin\$(Configuration)\net7.0\win-x64\publish</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\mptcp-enabler\mptcp-enabler.csproj" />

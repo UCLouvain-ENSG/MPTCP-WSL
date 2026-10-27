@@ -8,6 +8,9 @@
         <RootNamespace>mptcp_enabler</RootNamespace>
         <AssemblyName>mptcp_enabler</AssemblyName>
         <SelfContained>true</SelfContained>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <PublishSingleFile>true</PublishSingleFile>
+        <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
         <LangVersion>11</LangVersion>
     </PropertyGroup>
 

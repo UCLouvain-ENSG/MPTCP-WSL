@@ -16,6 +16,9 @@
 		<!-- Allow upgrades and prevent downgrades -->
 		<MajorUpgrade DowngradeErrorMessage="A later version of [ProductName] is already installed. Setup will now exit." />
 
+		<!-- A single self-contained .msi, no side-by-side .cab -->
+		<MediaTemplate EmbedCab="yes" />
+
 		<!-- Define the directory structure -->
 		<Directory Id="TARGETDIR" Name="SourceDir">
 			<Directory Id="ProgramFilesFolder">
@@ -39,7 +42,7 @@
 				<!-- Copies the App.WindowsService.exe file using the
                      project reference preprocessor variables -->
 				<File Id="mptcp_enabler.exe"
-					  Source="$(var.mptcp_enabler.TargetDir)win-x64\publish\mptcp_enabler.exe"
+					  Source="$(var.EnablerPublishDir)\mptcp_enabler.exe"
 					  KeyPath="true" />
 
 				<!-- Include the bzImage file in the installation -->
