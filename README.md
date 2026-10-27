@@ -54,6 +54,15 @@ Edit `config.json` and fill in `LocalProxy` (`user` and `password`). It is requi
 
 Point your Windows application at the SOCKS5 proxy `127.0.0.1:1080` with the `LocalProxy` credentials.
 
+### Tray icon
+The installer also adds a tray icon (`mptcp_tray.exe`) that starts at logon. It runs as you, not as Local System. Its colour is the state: green when the service runs and the proxy answers on `127.0.0.1:1080`, orange when the service runs but the proxy does not answer (the WSL VM is stopped or still starting), red when the service is stopped. Click it for:
+
+- the state of the service, of the WSL VM and of the proxy, and the interfaces listed in `config.json`;
+- **Enable / Disable service** and **Restart service** (Windows asks for administrator rights, because starting and stopping a service needs them);
+- **Keep WSL running** (on by default): the WSL2 VM stops a minute after the last `wsl` process exits, and the proxy goes with it. The tray holds a hidden `wsl --exec sleep infinity` for you. This has to be done as your user: a Local System service cannot keep your VM alive. The setting is stored in `%LOCALAPPDATA%\MPTCP\tray.json`;
+- **Service sets the WSL kernel** and **Service manages MPTCP endpoints**: `ManageKernelLocation` and `ManageEndpoint` of `config.json`, applied the next time the service starts;
+- copy the proxy address, open `config.json`, the log or `.wslconfig`, and restart WSL.
+
 ## Configuration file Documentation
 After the installation a config file named `config.json` should be created automatically and located at the  
 `C:\Users\<USER>\AppData\Local\MPTCP\`folder and is structured as follow :
@@ -73,7 +82,7 @@ Each endpoints can be configured as follow:
 ## Appendix
 - The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
 - If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and always require authentication (`LocalProxy`).
-- The WSL2 VM stops when no WSL process is running, and the proxy goes with it. Keep a `wsl` session open (or run a long-lived command such as `wsl -- sleep infinity`) while you use the proxy. The service re-attaches the interfaces every time the VM starts.
+- The WSL2 VM stops when no WSL process is running, and the proxy goes with it. The tray icon keeps it running for you (**Keep WSL running**). Without the tray, keep a `wsl` session open yourself, for example `wsl -- sleep infinity`. The service re-attaches the interfaces every time the VM starts.
 - Routing all Windows traffic through WSL (thesis, section 6.2) is not done by the service. It needs the default route of Windows to go through the WSL `eth0` gateway, which means lowering the metric of the WSL network interface itself (not of the route). Until this is automated, point your applications at the SOCKS proxy instead.
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.
 - U could use MPTCP on other distribution like Debian or Kali or other since it will share the same kernel, the most important thing is that the `mptcp-wsl.service` is running on a Ubuntu distribution.

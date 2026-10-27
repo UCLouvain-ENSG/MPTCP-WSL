@@ -3,7 +3,7 @@
 <!-- Define the variables in "$(var.*) expressions" -->
 <?define Name = "MPTCP Enabler" ?>
 <?define Manufacturer = "MPTCP" ?>
-<?define Version = "1.1.0.0" ?>
+<?define Version = "1.2.0.0" ?>
 <?define UpgradeCode = "9ED3FF33-8718-444E-B44B-69A2344B7E98" ?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -72,9 +72,18 @@
 			</Component>
 		</DirectoryRef>
 
+		<!-- The tray icon, started at every logon of every user. -->
+		<DirectoryRef Id="INSTALLFOLDER">
+			<Component Id="TrayExecutable" Bitness="always64">
+				<File Id="mptcp_tray.exe" Source="$(var.TrayPublishDir)\mptcp_tray.exe" KeyPath="true" />
+				<RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="MPTCPTray" Type="string" Value="&quot;[INSTALLFOLDER]mptcp_tray.exe&quot;" />
+			</Component>
+		</DirectoryRef>
+
 		<!-- Tell WiX to install the files -->
 		<Feature Id="Service" Title="MPTCP Enabler Setup" Level="1">
 			<ComponentRef Id="ServiceExecutable" />
+			<ComponentRef Id="TrayExecutable" />
 		</Feature>
 
 	</Package>
