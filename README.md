@@ -45,6 +45,7 @@ After the installation a config file named `config.json` should be created autom
 - **ManageEndpoint** : if set to true, the endpoint settings will be applied into WSL.
 - **Config**: Contains information about each NIC, endpoint parameters can be set on the Types section
 - **Proxy**: this section is about using a distant MPTCP-Compatible Proxy. This settings will not be took into account if left blank.
+- **LocalProxy**: `user` and `password` required by the local SOCKS5 proxy on `127.0.0.1:1080` (point Windows applications such as Steam at it). `mptcp-wsl.sh` refuses to start the local proxy while these are empty, so the proxy is never exposed unauthenticated.
 - **SubflowNr**: This restricts the Multipath TCP connection to use up to  `n` different subflows. Servers should protect themselves by setting this limit to a few subflows. Most use cases would work well with 2 or 4 subflows.
 - **AddAddrAcceptedNr**: This parameter limits the number of addresses that are learned over each Multipath TCP connection. This parameter could be used to protect the Multipath TCP implementation against attacks where two many addresses are advertised. Most use cases would work with 4 accepted addresses.
 
@@ -54,6 +55,6 @@ Each endpoints can be configured as follow:
 -   `backup`. This flag can be combined with the two other flags. When combined with the  `subflow` flag, it indicates that a backup subflow will be created. When combined with the  `signal` flag, it indicates that the address will be advertised as a backup address.
 ## Appendix
 - The service finds your Windows profile (where `config.json`, the log and `.wslconfig` live) from the second line of `C:\ProgramData\MPTCP\installedOn` (`DOMAIN\user`), or from the interactively logged-on user if that file does not exist. It waits until a profile is found.
-- If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1.
+- If the `Proxy` section is left blank, no upstream proxy is used and the local SOCKS server uses MPTCP directly. The local SOCKS servers only listen on 127.0.0.1 and always require authentication (`LocalProxy`).
 - The "MPTCP Enabler" service will create for each NIC an HyperV switch that begin with "MPTCP -", this prefix is important and must not be changed.
 - U could use MPTCP on other distribution like Debian or Kali or other since it will share the same kernel, the most important thing is that the `mptcp-wsl.service` is running on a Ubuntu distribution.
